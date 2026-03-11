@@ -80,6 +80,7 @@ print("args:", args)
 os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
 device = torch.device("cuda:0" if args.cuda else "cpu")
 
+total_start_time = time.time()
 print("Starting time: ", time.strftime('%Y-%m-%d %H:%M:%S',time.localtime(time.time())))
 
 ### DATA LOAD ###
@@ -174,11 +175,11 @@ def evaluate(data_loader, data_te, mask_his, topN):
     if is_leave_one_out:
         metrics = {}
         for key, values in metrics_dict.items():
-            metrics[key] = round(float(np.mean(values)), 4) if len(values) > 0 else 0.0
+            metrics[key] = float(np.mean(values)) if len(values) > 0 else 0.0
         return metrics
 
     metrics = evaluate_utils.hrs_and_ndcgs_k_multi(target_items, predict_items, topN)
-    return {k: round(v, 4) for k, v in metrics.items()}
+    return metrics
 
 best_epoch = 0
 best_metrics = {k: -100.0 for k in metric_keys}
@@ -246,4 +247,6 @@ if best_results is not None and best_test_results is not None:
     evaluate_utils.print_results(None, best_results, best_test_results)
 else:
     print("No validation was run; increase --epochs or reduce --eval_interval.")
+total_elapsed = time.time() - total_start_time
+print("Total running time: " + time.strftime("%H: %M: %S", time.gmtime(total_elapsed)))
 print("End time: ", time.strftime('%Y-%m-%d %H:%M:%S',time.localtime(time.time())))

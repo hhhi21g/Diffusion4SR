@@ -144,9 +144,9 @@ def _format_hr_ndcg(result):
         hr_key = f'HR@{k}'
         ndcg_key = f'NDCG@{k}'
         if hr_key in result:
-            parts.append(f"{hr_key}: {result[hr_key]:.4f}")
+            parts.append(f"{hr_key}: {result[hr_key] * 100:.5f}")
         if ndcg_key in result:
-            parts.append(f"{ndcg_key}: {result[ndcg_key]:.4f}")
+            parts.append(f"{ndcg_key}: {result[ndcg_key] * 100:.5f}")
     return ' '.join(parts)
 
 def print_results(loss, valid_result, test_result):

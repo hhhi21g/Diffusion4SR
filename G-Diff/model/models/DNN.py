@@ -27,10 +27,9 @@ class GDN(nn.Module):
         self.drop = nn.Dropout(dropout)
 
     def graph_layer(self, x):
-        for i in range(self.graph_layers):
-            x = torch.sparse.mm(self.graph, x.t()).t() + x
-            if self.norm:
-                x = F.normalize(x)
+        if self.graph.device != x.device:
+            self.graph = self.graph.to(x.device)
+        x = torch.sparse.mm(self.graph, x.t()).t() + x
         return x
 
     def forward(self, x, timesteps):
