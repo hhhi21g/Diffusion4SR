@@ -39,15 +39,7 @@ class GaussianDiffusion(nn.Module):
         super(GaussianDiffusion, self).__init__()
     
     def get_betas(self):
-        if self.noise_schedule in ("trunc_lin", "truncated-linear", "truncated_linear"):
-            # Migrate the truncated-linear beta schedule used in DiffuSR.
-            scale = 1000 / self.steps
-            beta_start = scale * 0.0001 + 0.01
-            beta_end = scale * 0.02 + 0.01
-            if beta_end > 1:
-                beta_end = scale * 0.001 + 0.01
-            return np.linspace(beta_start, beta_end, self.steps, dtype=np.float64)
-        elif self.noise_schedule == "linear" or self.noise_schedule == "linear-var":
+        if self.noise_schedule == "linear" or self.noise_schedule == "linear-var":
             start = self.noise_scale * self.noise_min
             end = self.noise_scale * self.noise_max
             if self.noise_schedule == "linear":

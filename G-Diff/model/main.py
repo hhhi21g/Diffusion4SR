@@ -18,7 +18,7 @@ import evaluate_utils
 import data_utils
 
 import random
-random_seed = 1997
+random_seed = 1
 torch.manual_seed(random_seed) # cpu
 torch.cuda.manual_seed(random_seed) # gpu
 np.random.seed(random_seed) # numpy
@@ -32,16 +32,13 @@ def seed_worker(worker_id):
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--dataset', type=str, default='ml-1m', help='choose the dataset')
-parser.add_argument('--data_path', type=str, default='../datasets_converted/', help='load data path')
-parser.add_argument('--lr', type=float, default=0.001, help='learning rate')
+parser.add_argument('--data_path', type=str, default='../datasets/', help='load data path')
+parser.add_argument('--lr', type=float, default=0.0001, help='learning rate')
 parser.add_argument('--drop_out', type=float, default=0.1, help='learning rate')
 parser.add_argument('--weight_decay', type=float, default=0.0)
-parser.add_argument('--batch_size', type=int, default=512)
-parser.add_argument('--epochs', type=int, default=500, help='upper epoch limit')
-parser.add_argument('--eval_interval', type=int, default=20, help='validate every N epochs')
-parser.add_argument('--patience', type=int, default=5, help='early stop after N consecutive non-improving validations')
-parser.add_argument('--topN', type=str, default='[1, 5, 10, 20]')
-parser.add_argument('--disable_history_mask', action='store_true',default='true', help='disable masking historical interactions during evaluation')
+parser.add_argument('--batch_size', type=int, default=400)
+parser.add_argument('--epochs', type=int, default=300, help='upper epoch limit')
+parser.add_argument('--topN', type=str, default='[10, 20, 50, 100]')
 parser.add_argument('--tst_w_val', action='store_true', help='test with validation')
 parser.add_argument('--cuda', action='store_true', help='use CUDA')
 parser.add_argument('--gpu', type=str, default='0', help='gpu card ID')
@@ -56,15 +53,15 @@ parser.add_argument('--w_max', type=float, default=1., help='the maximum weight 
 parser.add_argument('--time_type', type=str, default='add', help='cat or add')
 parser.add_argument('--graph_layers', type=int, default=1, help='the nums layer for the GNN')
 parser.add_argument('--graph_views', type=int, default=1, help='the nums views for the GNN')
-parser.add_argument('--mlp_hidden_dims', type=str, default='[128]', help='the dims for the DNN')
+parser.add_argument('--mlp_hidden_dims', type=str, default='[1000]', help='the dims for the DNN')
 parser.add_argument('--norm', type=bool, default=True, help='Normalize the input or not')
 parser.add_argument('--emb_size', type=int, default=10, help='timestep embedding size')
 
 # params for diffusion
 parser.add_argument('--sample_style', type=str, default='uniform', help='importance/uniform/fully')
 parser.add_argument('--mean_type', type=str, default='x0', help='MeanType for diffusion: x0, eps')
-parser.add_argument('--steps', type=int, default=32, help='diffusion steps')
-parser.add_argument('--noise_schedule', type=str, default='truncated-linear', help='the schedule for noise generating: truncated-linear/linear-var/linear/cosine/binomial')
+parser.add_argument('--steps', type=int, default=2, help='diffusion steps')
+parser.add_argument('--noise_schedule', type=str, default='linear-var', help='the schedule for noise generating')
 parser.add_argument('--noise_scale', type=float, default=1.0, help='noise scale for noise generating')
 parser.add_argument('--noise_min', type=float, default=0.0005, help='noise lower bound for noise generating')
 parser.add_argument('--noise_max', type=float, default=0.005, help='noise upper bound for noise generating')
@@ -72,15 +69,12 @@ parser.add_argument('--sampling_noise', type=bool, default=False, help='sampling
 parser.add_argument('--sampling_steps', type=int, default=0, help='steps of the forward process during inference')
 parser.add_argument('--reweight', type=bool, default=True, help='assign different weight to different timestep or not')
 
-args = parser.parse_args()
-topN = eval(args.topN)
-metric_keys = [f'HR@{k}' for k in topN] + [f'NDCG@{k}' for k in topN]
+args = parser.parse_args([])
 print("args:", args)
 
 os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
 device = torch.device("cuda:0" if args.cuda else "cpu")
 
-total_start_time = time.time()
 print("Starting time: ", time.strftime('%Y-%m-%d %H:%M:%S',time.localtime(time.time())))
 
 ### DATA LOAD ###
@@ -99,10 +93,6 @@ if args.tst_w_val:
 mask_tv = train_data_ori + valid_y_data
 
 print('data ready.')
-
-valid_pos_counts = np.asarray(valid_y_data.getnnz(axis=1)).reshape(-1)
-is_leave_one_out = np.all((valid_pos_counts == 0) | (valid_pos_counts == 1))
-print(f"Evaluation protocol: {'DiffuSR-like single-label (LOO)' if is_leave_one_out else 'G-Diff multi-label'}")
 
 
 ### Build Gaussian Diffusion ###
@@ -123,7 +113,7 @@ else:
     mlp_dims = [n_item, n_item]
 model = GDN(mlp_dims, args.emb_size, g, args.graph_layers, norm=args.norm, dropout=args.drop_out).to(device)
 
-optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 print("models ready.")
 
 param_num = 0
@@ -136,59 +126,37 @@ def evaluate(data_loader, data_te, mask_his, topN):
     model.eval()
     e_idxlist = list(range(mask_his.shape[0]))
     e_N = mask_his.shape[0]
+
     predict_items = []
     target_items = []
     for i in range(e_N):
         target_items.append(data_te[i, :].nonzero()[1].tolist())
-
-    if is_leave_one_out:
-        metrics_dict = {f'HR@{k}': [] for k in topN}
-        metrics_dict.update({f'NDCG@{k}': [] for k in topN})
-
+    
     with torch.no_grad():
         for batch_idx, batch in enumerate(data_loader):
-            user_indices = e_idxlist[batch_idx*args.batch_size:batch_idx*args.batch_size+len(batch)]
-            his_data = mask_his[user_indices]
+            his_data = mask_his[e_idxlist[batch_idx*args.batch_size:batch_idx*args.batch_size+len(batch)]]
             batch = batch.to(device)
             prediction = diffusion.p_sample(model, batch, args.sampling_steps, args.sampling_noise)
-            if not args.disable_history_mask:
-                prediction[his_data.nonzero()] = -np.inf
+            prediction[his_data.nonzero()] = -np.inf
 
-            if is_leave_one_out:
-                valid_rows, labels = [], []
-                for local_idx, user_idx in enumerate(user_indices):
-                    gt = target_items[user_idx]
-                    if len(gt) == 0:
-                        continue
-                    valid_rows.append(local_idx)
-                    labels.append(gt[0])
-                if len(labels) == 0:
-                    continue
-                labels = torch.tensor(labels, dtype=torch.long, device=prediction.device).view(-1, 1)
-                batch_metrics = evaluate_utils.hrs_and_ndcgs_k(prediction[valid_rows], labels, topN)
-                for key, value in batch_metrics.items():
-                    metrics_dict[key].append(value)
-            else:
-                _, indices = torch.topk(prediction, topN[-1], dim=-1)
-                predict_items.extend(indices.cpu().numpy().tolist())
+            _, indices = torch.topk(prediction, topN[-1])
+            indices = indices.cpu().numpy().tolist()
+            predict_items.extend(indices)
 
-    if is_leave_one_out:
-        metrics = {}
-        for key, values in metrics_dict.items():
-            metrics[key] = float(np.mean(values)) if len(values) > 0 else 0.0
-        return metrics
+    test_results = evaluate_utils.computeTopNAccuracy(target_items, predict_items, topN)
 
-    metrics = evaluate_utils.hrs_and_ndcgs_k_multi(target_items, predict_items, topN)
-    return metrics
+    return test_results
 
-best_epoch = 0
-best_metrics = {k: -100.0 for k in metric_keys}
-best_results, best_test_results = None, None
-no_improve_evals = 0
+best_recall, best_epoch = -100, 0
+best_test_result = None
 print("Start training...")
 lr_adjust_times = 0
 all_lr = [args.lr*i for i in [1, 0.1, 0.01]]
 for epoch in range(1, args.epochs + 1):
+    if epoch - best_epoch >= 20:
+        print('-'*18)
+        break
+
     model.train()
     start_time = time.time()
 
@@ -205,31 +173,18 @@ for epoch in range(1, args.epochs + 1):
         loss.backward()
         optimizer.step()
     
-    if epoch % args.eval_interval == 0:
-        valid_results = evaluate(test_loader, valid_y_data, train_data, topN)
+    if epoch % 5 == 0:
+        valid_results = evaluate(test_loader, valid_y_data, train_data, eval(args.topN))
         if args.tst_w_val:
-            test_results = evaluate(test_twv_loader, test_y_data, mask_tv, topN)
+            test_results = evaluate(test_twv_loader, test_y_data, mask_tv, eval(args.topN))
         else:
-            test_results = evaluate(test_loader, test_y_data, mask_tv, topN)
+            test_results = evaluate(test_loader, test_y_data, mask_tv, eval(args.topN))
         evaluate_utils.print_results(None, valid_results, test_results)
 
-        has_improvement = False
-        for key in metric_keys:
-            if valid_results[key] > best_metrics[key]:
-                best_metrics[key] = valid_results[key]
-                has_improvement = True
-
-        if has_improvement:
-            best_epoch = epoch
+        if valid_results[1][1] > best_recall: # recall@20 as selection
+            best_recall, best_epoch = valid_results[1][1], epoch
             best_results = valid_results
             best_test_results = test_results
-            no_improve_evals = 0
-        else:
-            no_improve_evals += 1
-            if no_improve_evals >= args.patience:
-                print('-'*18)
-                print(f"Early stopping at epoch {epoch} after {args.patience} consecutive non-improving validations.")
-                break
 
             # if not os.path.exists(args.save_path):
             #     os.makedirs(args.save_path)
@@ -243,10 +198,10 @@ for epoch in range(1, args.epochs + 1):
 
 print('==='*18)
 print("End. Best Epoch {:03d} ".format(best_epoch))
-if best_results is not None and best_test_results is not None:
-    evaluate_utils.print_results(None, best_results, best_test_results)
-else:
-    print("No validation was run; increase --epochs or reduce --eval_interval.")
-total_elapsed = time.time() - total_start_time
-print("Total running time: " + time.strftime("%H: %M: %S", time.gmtime(total_elapsed)))
+evaluate_utils.print_results(None, best_results, best_test_results)   
 print("End time: ", time.strftime('%Y-%m-%d %H:%M:%S',time.localtime(time.time())))
+
+
+
+
+

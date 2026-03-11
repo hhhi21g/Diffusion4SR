@@ -40,8 +40,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--dataset', type=str, default='yelp_clean', help='choose the dataset')
 parser.add_argument('--data_path', type=str, default='./datasets/', help='load data path')
 parser.add_argument('--batch_size', type=int, default=400)
-parser.add_argument('--topN', type=str, default='[1, 5, 10, 20]')
-parser.add_argument('--disable_history_mask', action='store_true', help='disable masking historical interactions during evaluation')
+parser.add_argument('--topN', type=str, default='[10, 20, 50, 100]')
 parser.add_argument('--tst_w_val', action='store_true', help='test with validation')
 parser.add_argument('--cuda', action='store_true', help='use CUDA')
 parser.add_argument('--gpu', type=str, default='0', help='gpu card ID')
@@ -61,7 +60,6 @@ parser.add_argument('--sampling_noise', type=bool, default=False, help='sampling
 parser.add_argument('--sampling_steps', type=int, default=0, help='steps of the forward process during inference')
 
 args = parser.parse_args()
-topN = eval(args.topN)
 
 args.data_path = args.data_path + args.dataset + '/'
 if args.dataset == 'amazon-book_clean':
@@ -93,7 +91,7 @@ train_path = args.data_path + 'train_list.npy'
 valid_path = args.data_path + 'valid_list.npy'
 test_path = args.data_path + 'test_list.npy'
 
-train_data, train_data_ori, valid_y_data, test_y_data, n_user, n_item, _ = data_utils.data_load(train_path, valid_path, test_path, args.w_min, args.w_max)
+train_data, train_data_ori, valid_y_data, test_y_data, n_user, n_item = data_utils.data_load(train_path, valid_path, test_path, args.w_min, args.w_max)
 train_dataset = data_utils.DataDiffusion(torch.FloatTensor(train_data.A))
 train_loader = DataLoader(train_dataset, batch_size=args.batch_size, pin_memory=True, shuffle=True, num_workers=4, worker_init_fn=worker_init_fn)
 test_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=False)
@@ -104,10 +102,6 @@ if args.tst_w_val:
 mask_tv = train_data_ori + valid_y_data
 
 print('data ready.')
-
-valid_pos_counts = np.asarray(valid_y_data.getnnz(axis=1)).reshape(-1)
-is_leave_one_out = np.all((valid_pos_counts == 0) | (valid_pos_counts == 1))
-print(f"Evaluation protocol: {'DiffuSR-like single-label (LOO)' if is_leave_one_out else 'G-Diff multi-label'}")
 
 
 ### CREATE DIFFUISON ###
@@ -137,57 +131,36 @@ def evaluate(data_loader, data_te, mask_his, topN):
     model.eval()
     e_idxlist = list(range(mask_his.shape[0]))
     e_N = mask_his.shape[0]
+
     predict_items = []
     target_items = []
     for i in range(e_N):
         target_items.append(data_te[i, :].nonzero()[1].tolist())
-
-    if is_leave_one_out:
-        metrics_dict = {f'HR@{k}': [] for k in topN}
-        metrics_dict.update({f'NDCG@{k}': [] for k in topN})
-
+    
     with torch.no_grad():
         for batch_idx, batch in enumerate(data_loader):
-            user_indices = e_idxlist[batch_idx*args.batch_size:batch_idx*args.batch_size+len(batch)]
-            his_data = mask_his[user_indices]
+            his_data = mask_his[e_idxlist[batch_idx*args.batch_size:batch_idx*args.batch_size+len(batch)]]
             batch = batch.to(device)
             prediction = diffusion.p_sample(model, batch, args.sampling_steps, args.sampling_noise)
-            if not args.disable_history_mask:
-                prediction[his_data.nonzero()] = -np.inf
+            prediction[his_data.nonzero()] = -np.inf
 
-            if is_leave_one_out:
-                valid_rows, labels = [], []
-                for local_idx, user_idx in enumerate(user_indices):
-                    gt = target_items[user_idx]
-                    if len(gt) == 0:
-                        continue
-                    valid_rows.append(local_idx)
-                    labels.append(gt[0])
-                if len(labels) == 0:
-                    continue
-                labels = torch.tensor(labels, dtype=torch.long, device=prediction.device).view(-1, 1)
-                batch_metrics = evaluate_utils.hrs_and_ndcgs_k(prediction[valid_rows], labels, topN)
-                for key, value in batch_metrics.items():
-                    metrics_dict[key].append(value)
-            else:
-                _, indices = torch.topk(prediction, topN[-1], dim=-1)
-                predict_items.extend(indices.cpu().numpy().tolist())
+            _, indices = torch.topk(prediction, topN[-1])
+            indices = indices.cpu().numpy().tolist()
+            predict_items.extend(indices)
 
-    if is_leave_one_out:
-        metrics = {}
-        for key, values in metrics_dict.items():
-            metrics[key] = round(float(np.mean(values)), 4) if len(values) > 0 else 0.0
-        return metrics
+    test_results = evaluate_utils.computeTopNAccuracy(target_items, predict_items, topN)
 
-    metrics = evaluate_utils.hrs_and_ndcgs_k_multi(target_items, predict_items, topN)
-    return {k: round(v, 4) for k, v in metrics.items()}
+    return test_results
 
-valid_results = evaluate(test_loader, valid_y_data, train_data, topN)
+valid_results = evaluate(test_loader, valid_y_data, train_data, eval(args.topN))
 if args.tst_w_val:
-    test_results = evaluate(test_twv_loader, test_y_data, mask_tv, topN)
+    test_results = evaluate(test_twv_loader, test_y_data, mask_tv, eval(args.topN))
 else:
-    test_results = evaluate(test_loader, test_y_data, mask_tv, topN)
+    test_results = evaluate(test_loader, test_y_data, mask_tv, eval(args.topN))
 evaluate_utils.print_results(None, valid_results, test_results)
+
+
+
 
 
 
