@@ -68,3 +68,57 @@ def print_results(loss, valid_result, test_result):
                             '-'.join([str(x) for x in test_result[1]]), 
                             '-'.join([str(x) for x in test_result[2]]), 
                             '-'.join([str(x) for x in test_result[3]])))
+
+
+def computeHRNDCG(GroundTruth, predictedIndices, topN, scale=100.0):
+    """
+    Compute HR@K and NDCG@K (DiffuSR-style) from ranked item indices.
+    GroundTruth: List[List[item_id]]
+    predictedIndices: List[List[item_id]]
+    topN: List[int]
+    """
+    hr = []
+    ndcg = []
+    user_num = max(len(predictedIndices), 1)
+
+    for k in topN:
+        hit_sum = 0.0
+        ndcg_sum = 0.0
+        for i in range(len(predictedIndices)):
+            gt_items = GroundTruth[i]
+            if len(gt_items) == 0:
+                continue
+
+            gt_set = set(gt_items)
+            hit_rank = None
+            for rank, item_id in enumerate(predictedIndices[i][:k]):
+                if item_id in gt_set:
+                    hit_rank = rank
+                    break
+
+            if hit_rank is not None:
+                hit_sum += 1.0
+                ndcg_sum += 1.0 / math.log2(hit_rank + 2)
+
+        hr.append(round(hit_sum / user_num * scale, 5))
+        ndcg.append(round(ndcg_sum / user_num * scale, 5))
+
+    return hr, ndcg
+
+
+def print_hr_ndcg_results(valid_result, test_result, topN):
+    """
+    Print HR/NDCG results with fixed key format: HR@K / NDCG@K.
+    valid_result/test_result: Tuple[List[float], List[float]] => (hr, ndcg)
+    """
+    if valid_result is not None:
+        valid_metrics = []
+        for k, hr_value, ndcg_value in zip(topN, valid_result[0], valid_result[1]):
+            valid_metrics.append("HR@{}: {:.5f} NDCG@{}: {:.5f}".format(k, hr_value, k, ndcg_value))
+        print("[Valid]: {}".format(" | ".join(valid_metrics)))
+
+    if test_result is not None:
+        test_metrics = []
+        for k, hr_value, ndcg_value in zip(topN, test_result[0], test_result[1]):
+            test_metrics.append("HR@{}: {:.5f} NDCG@{}: {:.5f}".format(k, hr_value, k, ndcg_value))
+        print("[Test]: {}".format(" | ".join(test_metrics)))

@@ -32,7 +32,7 @@ def seed_worker(worker_id):
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--dataset', type=str, default='ml-1m', help='choose the dataset')
-parser.add_argument('--data_path', type=str, default='../datasets/', help='load data path')
+parser.add_argument('--data_path', type=str, default='../datasets_converted/', help='load data path')
 parser.add_argument('--lr', type=float, default=0.0001, help='learning rate')
 parser.add_argument('--drop_out', type=float, default=0.1, help='learning rate')
 parser.add_argument('--weight_decay', type=float, default=0.0)
@@ -69,13 +69,20 @@ parser.add_argument('--sampling_noise', type=bool, default=False, help='sampling
 parser.add_argument('--sampling_steps', type=int, default=0, help='steps of the forward process during inference')
 parser.add_argument('--reweight', type=bool, default=True, help='assign different weight to different timestep or not')
 
-args = parser.parse_args([])
+args = parser.parse_args()
 print("args:", args)
 
 os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
 device = torch.device("cuda:0" if args.cuda else "cpu")
 
-print("Starting time: ", time.strftime('%Y-%m-%d %H:%M:%S',time.localtime(time.time())))
+def format_duration(seconds):
+    total_seconds = int(seconds)
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+program_start_time = time.time()
+print("Starting time: ", time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(program_start_time)))
 
 ### DATA LOAD ###
 train_path = os.path.join(args.data_path, args.dataset, 'train_list.npy')
@@ -143,12 +150,12 @@ def evaluate(data_loader, data_te, mask_his, topN):
             indices = indices.cpu().numpy().tolist()
             predict_items.extend(indices)
 
-    test_results = evaluate_utils.computeTopNAccuracy(target_items, predict_items, topN)
+    test_results = evaluate_utils.computeHRNDCG(target_items, predict_items, topN)
 
     return test_results
 
-best_recall, best_epoch = -100, 0
-best_test_result = None
+best_ndcg, best_epoch = -100, 0
+best_results, best_test_results = None, None
 print("Start training...")
 lr_adjust_times = 0
 all_lr = [args.lr*i for i in [1, 0.1, 0.01]]
@@ -174,15 +181,19 @@ for epoch in range(1, args.epochs + 1):
         optimizer.step()
     
     if epoch % 5 == 0:
-        valid_results = evaluate(test_loader, valid_y_data, train_data, eval(args.topN))
+        metric_ks = eval(args.topN)
+        valid_results = evaluate(test_loader, valid_y_data, train_data, metric_ks)
         if args.tst_w_val:
-            test_results = evaluate(test_twv_loader, test_y_data, mask_tv, eval(args.topN))
+            test_results = evaluate(test_twv_loader, test_y_data, mask_tv, metric_ks)
         else:
-            test_results = evaluate(test_loader, test_y_data, mask_tv, eval(args.topN))
-        evaluate_utils.print_results(None, valid_results, test_results)
+            test_results = evaluate(test_loader, test_y_data, mask_tv, metric_ks)
+        evaluate_utils.print_hr_ndcg_results(valid_results, test_results, metric_ks)
 
-        if valid_results[1][1] > best_recall: # recall@20 as selection
-            best_recall, best_epoch = valid_results[1][1], epoch
+        # NDCG@20 as selection criterion (fallback: use second K if 20 not present).
+        select_k = 20 if 20 in metric_ks else metric_ks[min(1, len(metric_ks) - 1)]
+        select_idx = metric_ks.index(select_k)
+        if valid_results[1][select_idx] > best_ndcg:
+            best_ndcg, best_epoch = valid_results[1][select_idx], epoch
             best_results = valid_results
             best_test_results = test_results
 
@@ -198,10 +209,9 @@ for epoch in range(1, args.epochs + 1):
 
 print('==='*18)
 print("End. Best Epoch {:03d} ".format(best_epoch))
-evaluate_utils.print_results(None, best_results, best_test_results)   
-print("End time: ", time.strftime('%Y-%m-%d %H:%M:%S',time.localtime(time.time())))
-
-
-
+evaluate_utils.print_hr_ndcg_results(best_results, best_test_results, eval(args.topN))
+program_end_time = time.time()
+print("End time: ", time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(program_end_time)))
+print("Total running time: ", format_duration(program_end_time - program_start_time))
 
 
