@@ -38,7 +38,7 @@ parser.add_argument('--drop_out', type=float, default=0.1, help='learning rate')
 parser.add_argument('--weight_decay', type=float, default=0.0)
 parser.add_argument('--batch_size', type=int, default=400)
 parser.add_argument('--epochs', type=int, default=300, help='upper epoch limit')
-parser.add_argument('--topN', type=str, default='[1, 5, 10, 20]')
+parser.add_argument('--topN', type=str, default='[10, 20, 50, 100]')
 parser.add_argument('--tst_w_val', action='store_true', help='test with validation')
 parser.add_argument('--cuda', action='store_true', help='use CUDA')
 parser.add_argument('--gpu', type=str, default='0', help='gpu card ID')
@@ -213,4 +213,5 @@ evaluate_utils.print_hr_ndcg_results(best_results, best_test_results, eval(args.
 program_end_time = time.time()
 print("End time: ", time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(program_end_time)))
 print("Total running time: ", format_duration(program_end_time - program_start_time))
+
 
