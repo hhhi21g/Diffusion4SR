@@ -72,7 +72,7 @@ class DataGenerator(object):
         valid_dataloader = DataLoader(self.valid_dataset,
                                         sampler=SequentialSampler(self.valid_dataset),
                                         batch_size=self.args.test_batch_size,
-                                        drop_last=True) 
+                                        drop_last=False) 
         return valid_dataloader
         
        
@@ -80,7 +80,7 @@ class DataGenerator(object):
         test_dataloader = DataLoader(self.test_dataset,
                                         sampler=SequentialSampler(self.test_dataset),
                                         batch_size=self.args.test_batch_size,
-                                        drop_last=True) 
+                                        drop_last=False) 
         return test_dataloader
     
     

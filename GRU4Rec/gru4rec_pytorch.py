@@ -153,7 +153,7 @@ class GRU4RecModel(nn.Module):
         return m.astype('float32')
     @torch.no_grad()
     def _reset_weights_to_compatibility_mode(self):
-        np.random.seed(42)
+        np.random.seed(1997)
         if self.constrained_embedding:
             n_input = self.layers[-1]
         elif self.embedding:

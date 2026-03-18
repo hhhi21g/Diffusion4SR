@@ -215,6 +215,10 @@ class CaDiRec(nn.Module):
         seq_output = seq_output[:,-1,:]
         test_items_emb = self.item_embedding.weight
         scores = torch.matmul(seq_output, test_items_emb.transpose(0, 1))  # [B n_items+2]
+        # Align with DiffuSR full-sort eval protocol:
+        # exclude padding token (0) and CaDiRec-specific mask token (item_size - 1).
+        scores[:, 0] = -1e9
+        scores[:, self.item_size - 1] = -1e9
         return scores
 
 

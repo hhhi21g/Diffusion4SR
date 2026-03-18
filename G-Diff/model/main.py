@@ -18,7 +18,7 @@ import evaluate_utils
 import data_utils
 
 import random
-random_seed = 1
+random_seed = 1997
 torch.manual_seed(random_seed) # cpu
 torch.cuda.manual_seed(random_seed) # gpu
 np.random.seed(random_seed) # numpy

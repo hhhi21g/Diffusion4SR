@@ -192,6 +192,11 @@ class Trainer:
                         )
                         break
 
+        print("********** Best Checkpoint Summary **********")
+        print(f"objective_metric={objective_metric}, best_epoch={best_epoch}, best_valid_score={best_valid_score:.6f}")
+        print(f"best_valid_metrics={best_valid_metrics}")
+        print(f"best_test_metrics={best_test_metrics}")
+
         return {
             "best_epoch": best_epoch,
             "best_valid_metrics": best_valid_metrics,
@@ -199,6 +204,7 @@ class Trainer:
         }
             
     
+        
     def eval(self, epoch, test=False):
       
         self.model.eval()
@@ -217,20 +223,13 @@ class Trainer:
             "HR@20": [], "NDCG@20": [],
         }
         for batch in prog_iter:
-            user_ids, input_ids, label_items = \
-                                                batch["user_id"].to(self.device), \
-                                                batch["input_ids"].to(self.device), \
-                                                batch["answer"].to(self.device), \
+            input_ids, label_items = \
+                                    batch["input_ids"].to(self.device), \
+                                    batch["answer"].to(self.device), \
                                                                       
             bs_scores = self.model.full_sort_predict(input_ids).detach().cpu()
             
-            batch_user_index = user_ids.cpu().numpy()
-            # print("bs_scores", bs_scores.shape)
-            # print("valid_rating_matrix", (self.generator.test_rating_matrix[batch_user_index].toarray() > 0).shape)
-            if not test:
-                bs_scores[self.generator.valid_rating_matrix[batch_user_index].toarray() > 0] = -100
-            else:
-                bs_scores[self.generator.test_rating_matrix[batch_user_index].toarray() > 0] = -100
+            # DiffuSR alignment: do not mask seen-history items in ranking.
             bs_labels = label_items.reshape(-1,1).cpu()
             metrics = hrs_and_ndcgs_k(bs_scores, bs_labels, metric_ks)
             for k, v in metrics.items():

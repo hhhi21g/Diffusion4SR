@@ -5,10 +5,10 @@ def get_config():
     parser = argparse.ArgumentParser()
     #************SASRec*******************
     parser.add_argument('--gpu_id', type=int, default=0, help='gpu')
-    parser.add_argument("--dataset", default="Beauty", choices=['ml-1m', 'Beauty', 'Sports_and_Outdoors', 'Yelp', 'Toys_and_Games'], help="Choose the dataset")
+    parser.add_argument("--dataset", default="amazon_beauty", choices=['ml-1m', 'amazon_beauty', 'sports', 'video'], help="Choose the dataset")
     parser.add_argument("--model_name", default="diffsas", help="Choose the model")
     parser.add_argument("--model_idx", default="0", help="Choose the idx")
-    parser.add_argument("--data_path", default="./data/", help="Choose the dataset path")
+    parser.add_argument("--data_path", default="./data_new/", help="Choose the dataset path")
     parser.add_argument("--output_dir", default="./saved_models/", help="save the model")
     parser.add_argument("--check_path", default='', type=str,help="the save path of checkpoints for different running")
     parser.add_argument('--epochs', type=int, default=400, help='Number of training epochs')
