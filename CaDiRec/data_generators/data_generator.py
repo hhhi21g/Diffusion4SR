@@ -1,7 +1,7 @@
 from tqdm import tqdm
 from collections import defaultdict
 import time
-from utils import generate_rating_matrix_valid, generate_rating_matrix_test, neg_sample
+from utils import generate_rating_matrix_valid, generate_rating_matrix_test
 from torch.utils.data import Dataset, DataLoader
 import random
 import copy 
@@ -37,15 +37,17 @@ class DataGenerator(object):
         valid_rating_matrix = generate_rating_matrix_valid(user_seq, num_users, num_items)
         test_rating_matrix = generate_rating_matrix_test(user_seq, num_users, num_items)
     
-        return user_seq, max_item, valid_rating_matrix, test_rating_matrix
+        has_item_zero = 0 in item_set
+        return user_seq, max_item, valid_rating_matrix, test_rating_matrix, has_item_zero
   
     
     def create_dataset(self):
         '''Load train, validation, test dataset'''
-        self.user_seq, self.max_item, self.valid_rating_matrix, self.test_rating_matrix = self.get_user_seqs(self.data_file)
+        self.user_seq, self.max_item, self.valid_rating_matrix, self.test_rating_matrix, self.has_item_zero = self.get_user_seqs(self.data_file)
         self.item_size = self.max_item + 2
         self.mask_id = self.max_item + 1
         self.args.item_size = self.item_size
+        self.args.has_item_zero = self.has_item_zero
         
         self.train_dataset = SASRecDataset(self.args, self.user_seq, data_type="train")
         self.valid_dataset = SASRecDataset(self.args, self.user_seq, data_type="valid")
@@ -92,14 +94,31 @@ class SASRecDataset(Dataset):
         self.data_type = data_type
         self.max_len = args.max_seq_length
         
-    def mask_input_ids(self, input_ids, p):
+    def mask_input_ids(self, input_ids, attention_mask, p):
         mask_indices = []
-        for token in input_ids:
-            if token == 0:
-                mask_indices.append(0)  # 元素为0的位置不参与mask
+        mask_token_id = self.args.item_size - 1
+        for token, is_valid in zip(input_ids, attention_mask):
+            if int(is_valid) == 0 or token == mask_token_id:
+                # 屏蔽padding位和mask_token位，不参与随机mask
+                mask_indices.append(0)
             else:
                 mask_indices.append(1 if random.random() < p else 0)
         return mask_indices
+
+    def sample_negative_item(self, seq_set):
+        """
+        Sample a real item id as negative target.
+        Excludes padding id (0 when it is padding) and excludes mask token id.
+        """
+        has_item_zero = getattr(self.args, "has_item_zero", False)
+        low = 0 if has_item_zero else 1
+        high = self.args.item_size - 2  # real item upper bound; item_size-1 is mask token
+        if high < low:
+            return low
+        item = random.randint(low, high)
+        while item in seq_set:
+            item = random.randint(low, high)
+        return item
 
     def _data_sample_rec_task(self, user_id, items, input_ids, target_pos, answer):
         # make a deep copy to avoid original sequence be modified
@@ -107,7 +126,7 @@ class SASRecDataset(Dataset):
         target_neg = []
         seq_set = set(items)
         for _ in input_ids:
-            target_neg.append(neg_sample(seq_set, self.args.item_size))
+            target_neg.append(self.sample_negative_item(seq_set))
 
         pad_len = self.max_len - len(input_ids)
         input_ids = [0] * pad_len + input_ids
@@ -117,12 +136,13 @@ class SASRecDataset(Dataset):
         input_ids = input_ids[-self.max_len :]
         target_pos = target_pos[-self.max_len :]
         target_neg = target_neg[-self.max_len :]
-        attention_mask = [1.0 if token > 0 else 0.0 for token in input_ids]
+        valid_len = min(len(copied_input_ids), self.max_len)
+        attention_mask = [0.0] * (self.max_len - valid_len) + [1.0] * valid_len
         assert len(input_ids) == self.max_len
         assert len(target_pos) == self.max_len
         assert len(target_neg) == self.max_len
         
-        masked_indices0 = self.mask_input_ids(input_ids, self.args.mlm_probability_train) # random mask some items and return the indices. for diffusion train
+        masked_indices0 = self.mask_input_ids(input_ids, attention_mask, self.args.mlm_probability_train) # random mask some items and return the indices. for diffusion train
         # masked_indices1 = self.mask_input_ids(input_ids, self.args.mlm_probability) # random mask some items and return the indices.  for sas aug
         # masked_indices2 = self.mask_input_ids(input_ids, self.args.mlm_probability) # random mask some items and return the indices.  for sas aug
         
@@ -153,11 +173,13 @@ class SASRecDataset(Dataset):
             answer = 0  # no use
 
         elif self.data_type == "valid":
+            # leave-one-out validation: predict the penultimate item from train prefix
             input_ids = items[:-2]
             target_pos = items[1:-1]
             answer = [items[-2]]
 
         else:
+            # leave-one-out test: input is train+val prefix, target is the last item
             input_ids = items[:-1]
             target_pos = items[1:]
             answer = [items[-1]]

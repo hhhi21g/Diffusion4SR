@@ -13,7 +13,10 @@ class GDN(nn.Module):
         self.mlp_dims = mlp_dims
         self.time_emb_dim = emb_size
         self.norm = norm
-        self.graph = graph
+        # Register graph as buffer so it follows model.to(device).
+        if graph.layout != torch.sparse_coo:
+            graph = graph.to_sparse()
+        self.register_buffer("graph", graph.coalesce())
         self.graph_layers = graph_layers
         self.mlp_dims[0] += self.time_emb_dim
         self.emb_layer = nn.Linear(self.time_emb_dim, self.time_emb_dim)
@@ -27,10 +30,10 @@ class GDN(nn.Module):
         self.drop = nn.Dropout(dropout)
 
     def graph_layer(self, x):
-        graph = self.graph
-        if graph.device != x.device:
-            graph = graph.to(x.device)
-        x = torch.sparse.mm(graph, x.t()).t() + x
+        for i in range(self.graph_layers):
+            x = torch.sparse.mm(self.graph, x.t()).t() + x
+            if self.norm:
+                x = F.normalize(x)
         return x
 
     def forward(self, x, timesteps):

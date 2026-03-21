@@ -14,64 +14,58 @@ def set_seed(seed):
     torch.cuda.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True   # only add when conv in your model
+    torch.backends.cudnn.benchmark = False
     
 
-def cal_hr(label, predict, ks):
-    # Keep this implementation identical to DiffuSR for metric alignment.
-    max_ks = max(ks)
-    _, topk_predict = torch.topk(predict, k=max_ks, dim=-1)
-    hit = label == topk_predict
-    hr = [hit[:, :ks[i]].sum().item() / label.size()[0] for i in range(len(ks))]
-    return hr
+def recall_at_k(actual, predicted, topk):
+    sum_recall = 0.0
+    num_users = len(predicted)
+    true_users = 0
+    # print("actual", len(actual))
+    for i in range(num_users):
+        act_set = set(actual[i])
+        pred_set = set(predicted[i][:topk])
+        if len(act_set) != 0:
+            sum_recall += len(act_set & pred_set) / float(len(act_set))
+            true_users += 1
+    return sum_recall / true_users
+
+def ndcg_k(actual, predicted, topk):
+    res = 0
+    for user_id in range(len(actual)):
+        pred_k = min(topk, len(predicted[user_id]))
+        k = min(topk, len(actual[user_id]), pred_k)
+        idcg = idcg_k(k)
+        dcg_k = sum([int(predicted[user_id][j] in
+                         set(actual[user_id])) / math.log(j+2, 2) for j in range(pred_k)])
+        res += dcg_k / idcg
+    return res / float(len(actual))
 
 
-def dcg(hit):
-    log2 = torch.log2(torch.arange(1, hit.size()[-1] + 1) + 1).unsqueeze(0)
-    rel = (hit / log2).sum(dim=-1)
-    return rel
+# Calculates the ideal discounted cumulative gain at k
+def idcg_k(k):
+    res = sum([1.0/math.log(i+2, 2) for i in range(k)])
+    if not res:
+        return 1.0
+    else:
+        return res
 
 
-def cal_ndcg(label, predict, ks):
-    # Keep this implementation identical to DiffuSR for metric alignment.
-    max_ks = max(ks)
-    _, topk_predict = torch.topk(predict, k=max_ks, dim=-1)
-    hit = (label == topk_predict).int()
-    ndcg = []
-    for k in ks:
-        max_dcg = dcg(torch.tensor([1] + [0] * (k - 1)))
-        predict_dcg = dcg(hit[:, :k])
-        ndcg.append((predict_dcg / max_dcg).mean().item())
-    return ndcg
+def get_full_sort_score(epoch, answers, pred_list, ks=(1, 5, 10, 20)):
+        metrics = {}
+        for k in ks:
+            hr = recall_at_k(answers, pred_list, k)
+            ndcg = ndcg_k(answers, pred_list, k)
+            metrics[f"HR@{k}"] = hr
+            metrics[f"NDCG@{k}"] = ndcg
 
-
-def hrs_and_ndcgs_k(scores, labels, ks):
-    metrics = {}
-    labels_cpu = labels.clone().detach().to('cpu')
-    scores_cpu = scores.clone().detach().to('cpu')
-    ndcg = cal_ndcg(labels_cpu, scores_cpu, ks)
-    hr = cal_hr(labels_cpu, scores_cpu, ks)
-    for k, ndcg_temp, hr_temp in zip(ks, ndcg, hr):
-        metrics[f'HR@{k}'] = hr_temp
-        metrics[f'NDCG@{k}'] = ndcg_temp
-    return metrics
-
-
-def get_full_sort_score(epoch, metrics_dict):
-    # Average per-batch metrics, then print percentage values only.
-    ordered_keys = [
-        "HR@1", "NDCG@1",
-        "HR@5", "NDCG@5",
-        "HR@10", "NDCG@10",
-        "HR@20", "NDCG@20",
-    ]
-    metrics_mean = {}
-    for key in ordered_keys:
-        values = metrics_dict.get(key, [])
-        metrics_mean[key] = float(np.mean(values)) if len(values) > 0 else 0.0
-
-    values_str = " ".join([f"{metrics_mean[key] * 100:.5f}" for key in ordered_keys])
-    print(values_str)
-    return metrics_mean
+        metrics_percent = {k: v * 100.0 for k, v in metrics.items()}
+        ordered_keys = []
+        for k in ks:
+            ordered_keys.extend([f"HR@{k}", f"NDCG@{k}"])
+        values_str = ", ".join([f"{key}: {metrics_percent[key]:.5f}%" for key in ordered_keys])
+        print(f"Epoch {epoch} -> {values_str}")
+        return metrics, metrics_percent
         
         
         

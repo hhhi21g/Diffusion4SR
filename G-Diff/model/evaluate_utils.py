@@ -72,10 +72,8 @@ def print_results(loss, valid_result, test_result):
 
 def computeHRNDCG(GroundTruth, predictedIndices, topN, scale=100.0):
     """
-    Compute HR@K and NDCG@K (DiffuSR-style) from ranked item indices.
-    GroundTruth: List[List[item_id]]
-    predictedIndices: List[List[item_id]]
-    topN: List[int]
+    Compute HR@K and NDCG@K (leave-one-out friendly).
+    Returns values in percentage when scale=100.
     """
     hr = []
     ndcg = []
@@ -107,10 +105,6 @@ def computeHRNDCG(GroundTruth, predictedIndices, topN, scale=100.0):
 
 
 def print_hr_ndcg_results(valid_result, test_result, topN):
-    """
-    Print HR/NDCG results with fixed key format: HR@K / NDCG@K.
-    valid_result/test_result: Tuple[List[float], List[float]] => (hr, ndcg)
-    """
     if valid_result is not None:
         valid_metrics = []
         for k, hr_value, ndcg_value in zip(topN, valid_result[0], valid_result[1]):

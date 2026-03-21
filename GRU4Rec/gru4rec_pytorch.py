@@ -1,4 +1,5 @@
 import math
+import random
 import numpy as np
 import pandas as pd
 import torch
@@ -148,12 +149,10 @@ class GRU4RecModel(nn.Module):
     def _init_numpy_weights(self, shape):
         sigma = np.sqrt(6.0 / (shape[0] + shape[1]))
         m = np.random.rand(*shape).astype('float32') * 2 * sigma - sigma
-        # Newer numpy/pytorch combinations may upcast to float64 here.
-        # Keep compatibility-mode initialization explicitly in float32.
-        return m.astype('float32')
+        return m
     @torch.no_grad()
-    def _reset_weights_to_compatibility_mode(self):
-        np.random.seed(1997)
+    def _reset_weights_to_compatibility_mode(self, seed=42):
+        np.random.seed(seed)
         if self.constrained_embedding:
             n_input = self.layers[-1]
         elif self.embedding:
@@ -338,7 +337,7 @@ class SessionDataIterator:
         offset[1:] = data.groupby(column).size().cumsum()
         return offset
 
-    def __call__(self, enable_neg_samples, reset_hook=None, return_last_mask=False):
+    def __call__(self, enable_neg_samples, reset_hook=None):
         batch_size = self.batch_size
         iters = np.arange(batch_size)
         maxiter = iters.max()
@@ -353,18 +352,12 @@ class SessionDataIterator:
             for i in range(minlen-1):
                 in_idx = out_idx
                 out_idx = torch.tensor(self.data_items[start+i+1], requires_grad=False, device=self.device)
-                if return_last_mask:
-                    # True iff this transition predicts the last item of its session.
-                    last_mask = torch.tensor((start + i + 1) == (end - 1), device=self.device, dtype=torch.bool)
                 if enable_neg_samples:
                     sample = self.sample_cache.get_sample()
                     y = torch.cat([out_idx, sample])
                 else:
                     y = out_idx
-                if return_last_mask:
-                    yield in_idx, y, last_mask
-                else:
-                    yield in_idx, y
+                yield in_idx, y
             start = start+minlen-1
             finished_mask = (end-start<=1)
             n_finished = finished_mask.sum()
@@ -388,7 +381,7 @@ class SessionDataIterator:
 class GRU4Rec:
     def __init__(self, layers=[100], loss='cross-entropy', batch_size=64, dropout_p_embed=0.0,
                  dropout_p_hidden=0.0, learning_rate=0.05, momentum=0.0, sample_alpha=0.5, n_sample=2048, embedding=0,
-                 constrained_embedding=True, n_epochs=10, bpreg=1.0, elu_param=0.5, logq=0.0, device=torch.device('cuda:0')):
+                 constrained_embedding=True, n_epochs=10, bpreg=1.0, elu_param=0.5, logq=0.0, random_seed=42, device=torch.device('cuda:0')):
         self.device = device
         self.layers = layers
         self.loss = loss
@@ -403,6 +396,7 @@ class GRU4Rec:
         self.momentum = momentum
         self.sample_alpha = sample_alpha
         self.n_sample = n_sample
+        self.random_seed = random_seed
         if embedding == 'layersize':
             self.embedding = self.layers[0]
         else:
@@ -456,13 +450,18 @@ class GRU4Rec:
         return torch.sum((-torch.log(torch.sum(torch.sigmoid(target_scores-O)*softmax_scores, dim=1)+1e-24)+self.bpreg*torch.sum((O**2)*softmax_scores, dim=1)))
     def fit(self, data, sample_cache_max_size=10000000, compatibility_mode=True, item_key='ItemId', session_key='SessionId', time_key='Time'):
         self.error_during_train = False
+        random.seed(self.random_seed)
+        np.random.seed(self.random_seed)
+        torch.manual_seed(self.random_seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(self.random_seed)
         self.data_iterator = SessionDataIterator(data, self.batch_size, n_sample=self.n_sample, sample_alpha=self.sample_alpha, sample_cache_max_size=sample_cache_max_size, item_key=item_key, session_key=session_key, time_key=time_key, session_order='time', device=self.device)
         if self.logq and self.loss == 'cross-entropy':
             pop = data.groupby(item_key).size()
             self.P0 = torch.tensor(pop[self.data_iterator.itemidmap.index.values], dtype=torch.float32, device=self.device)
         model = GRU4RecModel(self.data_iterator.n_items, self.layers, self.dropout_p_embed, self.dropout_p_hidden, self.embedding, self.constrained_embedding).to(self.device)
         if compatibility_mode: 
-            model._reset_weights_to_compatibility_mode()
+            model._reset_weights_to_compatibility_mode(seed=self.random_seed)
         self.model = model
         opt = IndexedAdagradM(self.model.parameters(), self.learning_rate, self.momentum)
         for epoch in range(self.n_epochs):
@@ -526,13 +525,7 @@ class GRU4Rec:
         torch.save(self, path)
     @classmethod
     def loadmodel(cls, path, device='cuda:0'):
-        # PyTorch 2.6+ changed torch.load default to weights_only=True.
-        # This project saves the full GRU4Rec object, so we need weights_only=False.
-        try:
-            gru = torch.load(path, map_location=device, weights_only=False)
-        except TypeError:
-            # Backward compatibility for older PyTorch versions without weights_only.
-            gru = torch.load(path, map_location=device)
+        gru = torch.load(path, map_location=device)
         gru.device = torch.device(device)
         if hasattr(gru, 'data_iterator'):
             gru.data_iterator.device = torch.device(device)

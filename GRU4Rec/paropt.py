@@ -2,8 +2,6 @@ import argparse
 import os
 import optuna
 import json
-import subprocess
-import sys
 
 class MyHelpFormatter(argparse.HelpFormatter):
     def __init__(self, *args, **kwargs):
@@ -15,69 +13,46 @@ class MyHelpFormatter(argparse.HelpFormatter):
         if columns is not None:
             self._width = columns
 
-parser = argparse.ArgumentParser(formatter_class=MyHelpFormatter, description='Train or load a GRU4Rec model & optimize/evaluate ranking metrics on the specified test set(s).')
+parser = argparse.ArgumentParser(formatter_class=MyHelpFormatter, description='Train or load a GRU4Rec model & measure recall and MRR on the specified test set(s).')
 parser.add_argument('path', metavar='PATH', type=str, help='Path to the training data (TAB separated file (.tsv or .txt) or pickled pandas.DataFrame object (.pickle)) (if the --load_model parameter is NOT provided) or to the serialized model (if the --load_model parameter is provided).')
 parser.add_argument('test', metavar='TEST_PATH', type=str, help='Path to the test data set(s) located at TEST_PATH.')
 parser.add_argument('-g', '--gru4rec_model', metavar='GRFILE', type=str, default='gru4rec_pytorch', help='Name of the file containing the GRU4Rec class. Can be sued to select different varaiants. (Default: gru4rec_pytorch)')
 parser.add_argument('-fp', '--fixed_parameters', metavar='PARAM_STRING', type=str, help='Fixed training parameters provided as a single parameter string. The format of the string is `param_name1=param_value1,param_name2=param_value2...`, e.g.: `loss=bpr-max,layers=100,constrained_embedding=True`. Boolean training parameters should be either True or False; parameters that can take a list should use / as the separator (e.g. layers=200/200). Mutually exclusive with the -pf (--parameter_file) and the -l (--load_model) arguments and one of the three must be provided.')
 parser.add_argument('-opf', '--optuna_parameter_file', metavar='PATH', type=str, help='File describing the parameter space for optuna.')
-parser.add_argument('-m', '--measure', metavar='AT', type=int, nargs='?', default=20, help='Measure metric at the defined recommendation list length for optimization. A single value can be provided. (Default: 20)')
+parser.add_argument('-m', '--measure', metavar='AT', type=int, nargs='?', default=20, help='Measure recall & MRR at the defined recommendation list length. A single values can be provided. (Default: 20)')
 parser.add_argument('-nt', '--ntrials', metavar='NT', type=int, nargs='?', default=50, help='Number of optimization trials to perform (Default: 50)')
-parser.add_argument('-fm', '--final_measure', metavar='AT', type=int, nargs='*', default=[20], help='Measure HR/NDCG at the defined recommendation list length(s) after optimization is finished. Multiple values can be provided. (Default: 20)')
-parser.add_argument('-pm', '--primary_metric', metavar='METRIC', choices=['hr', 'ncg', 'ndcg', 'recall', 'mrr'], default='hr', help='Set primary metric used by Optuna objective (use ndcg for NDCG). (Default: hr)')
-parser.add_argument('-e', '--eval_type', metavar='EVAL_TYPE', choices=['standard', 'conservative', 'median'], default='standard', help='Sets how to handle if multiple items in the ranked list have the same prediction score (which is usually due to saturation or an error). See the documentation of evaluate_gpu() in evaluation.py for further details. (Default: standard)')
-parser.add_argument('--eval_scope', metavar='SCOPE', choices=['last', 'all'], default='last', help='Evaluation target scope passed to run.py. (Default: last)')
+parser.add_argument('-fm', '--final_measure', metavar='AT', type=int, nargs='*', default=[20], help='Measure recall & MRR at the defined recommendation list length(s) after the optimization is finished. Multiple values can be provided. (Default: 20)')
+parser.add_argument('-pm', '--primary_metric', metavar='METRIC', choices=['recall', 'mrr'], default='recall', help='Set primary metric, recall or mrr (e.g. for paropt). (Default: recall)')
+parser.add_argument('-e', '--eval_type', metavar='EVAL_TYPE', choices=['standard', 'conservative', 'median', 'tiebreaking'], default='standard', help='Sets how to handle if multiple items in the ranked list have the same prediction score (which is usually due to saturation or an error). See the documentation of evaluate_gpu() in evaluation.py for further details. (Default: standard)')
 parser.add_argument('-d', '--device', metavar='D', type=str, default='cuda:0', help='Device used for computations (default: cuda:0).')
 parser.add_argument('-ik', '--item_key', metavar='IK', type=str, default='ItemId', help='Column name corresponding to the item IDs (detault: ItemId).')
 parser.add_argument('-sk', '--session_key', metavar='SK', type=str, default='SessionId', help='Column name corresponding to the session IDs (default: SessionId).')
 parser.add_argument('-tk', '--time_key', metavar='TK', type=str, default='Time', help='Column name corresponding to the timestamp (default: Time).')
 
 args = parser.parse_args()
-if args.fixed_parameters is None:
-    raise RuntimeError('`-fp/--fixed_parameters` is required.')
-if args.optuna_parameter_file is None:
-    raise RuntimeError('`-opf/--optuna_parameter_file` is required.')
 
+import pexpect
 import numpy as np
 from collections import OrderedDict
 import importlib
 import re
 
-def generate_command(optimized_param_str, include_primary_metric):
-    param_str = '{},{}'.format(args.fixed_parameters, optimized_param_str) if optimized_param_str else args.fixed_parameters
-    command = [
-        sys.executable, 'run.py', args.path,
-        '-t', args.test,
-        '-g', args.gru4rec_model,
-        '-ps', param_str,
-        '-e', args.eval_type,
-        '--eval_scope', args.eval_scope,
-        '-d', args.device,
-        '-ik', args.item_key,
-        '-sk', args.session_key,
-        '-tk', args.time_key
-    ]
-    if include_primary_metric:
-        command.extend(['-m', str(args.measure), '-pm', args.primary_metric, '-lpm'])
-    else:
-        command.extend(['-m'] + [str(x) for x in args.final_measure])
+def generate_command(optimized_param_str):
+    command = 'python run.py "{}" -t "{}" -g {} -ps {},{} -m {} -pm {} -lpm -e {} -d {} -ik {} -sk {} -tk {}'.format(args.path, args.test, args.gru4rec_model, args.fixed_parameters, optimized_param_str, args.measure, args.primary_metric, args.eval_type, args.device, args.item_key, args.session_key, args.time_key)
     return command
 
 def run_once(optimized_param_str):
-    command = generate_command(optimized_param_str, include_primary_metric=True)
-    proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
-    val = None
-    for line in proc.stdout:
+    command = generate_command(optimized_param_str)
+    cmd = pexpect.spawnu(command, timeout=None, maxread=1)
+    line = cmd.readline()
+    while line:
         line = line.strip()
         print(line)
-        m = re.match(r'PRIMARY METRIC:\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)', line)
-        if m:
-            val = float(m.group(1))
-    rc = proc.wait()
-    if rc != 0:
-        raise RuntimeError('Trial run failed with exit code {}'.format(rc))
-    if val is None:
-        raise RuntimeError('Could not parse PRIMARY METRIC from run output.')
+        if re.match('PRIMARY METRIC: -*\\d\\.\\d+e*-*\\d*', line):
+            t = line.split(':')[1].lstrip()
+            val = float(t)
+            break
+        line = cmd.readline()
     return val
 
 class Parameter:
@@ -135,10 +110,10 @@ study.optimize(lambda trial: objective(trial, par_space), n_trials=args.ntrials)
 
 print('Running final eval @{}:'.format(args.final_measure))
 optimized_param_str = ','.join(['{}={}'.format(k,v) for k,v in study.best_params.items()])
-command = generate_command(optimized_param_str, include_primary_metric=False)
-proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
-for line in proc.stdout:
-    print(line.strip())
-rc = proc.wait()
-if rc != 0:
-    raise RuntimeError('Final evaluation failed with exit code {}'.format(rc))
+command = 'python run.py "{}" -t "{}" -g {} -ps {},{} -m {} -e {} -d {} -ik {} -sk {} -tk {}'.format(args.path, args.test, args.gru4rec_model, args.fixed_parameters, optimized_param_str, ' '.join([str(x) for x in args.final_measure]), args.eval_type, args.device, args.item_key, args.session_key, args.time_key)
+cmd = pexpect.spawnu(command, timeout=None, maxread=1)
+line = cmd.readline()
+while line:
+    line = line.strip()
+    print(line)
+    line = cmd.readline()

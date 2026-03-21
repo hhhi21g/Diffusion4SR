@@ -5,75 +5,30 @@ Train a diffusion model for recommendation
 import argparse
 import os
 import time
-import numpy as np
+import random
 
+import numpy as np
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
-import torch.backends.cudnn as cudnn
 
 import models.gaussian_diffusion as gd
 from models.DNN import GDN
 import evaluate_utils
 import data_utils
 
-import random
+
 random_seed = 1997
-torch.manual_seed(random_seed) # cpu
-torch.cuda.manual_seed(random_seed) # gpu
-np.random.seed(random_seed) # numpy
-random.seed(random_seed) # random and transforms
-torch.backends.cudnn.deterministic=True # cudnn
+torch.manual_seed(random_seed)  # cpu
+torch.cuda.manual_seed(random_seed)  # gpu
+np.random.seed(random_seed)  # numpy
+random.seed(random_seed)  # random
+torch.backends.cudnn.deterministic = True
+
+
 def worker_init_fn(worker_id):
     np.random.seed(random_seed + worker_id)
-def seed_worker(worker_id):
-    worker_seed = torch.initial_seed() % 2**32
-    np.random.seed(worker_seed)
 
-parser = argparse.ArgumentParser()
-parser.add_argument('--dataset', type=str, default='ml-1m', help='choose the dataset')
-parser.add_argument('--data_path', type=str, default='../datasets_converted/', help='load data path')
-parser.add_argument('--lr', type=float, default=0.0001, help='learning rate')
-parser.add_argument('--drop_out', type=float, default=0.1, help='learning rate')
-parser.add_argument('--weight_decay', type=float, default=0.0)
-parser.add_argument('--batch_size', type=int, default=400)
-parser.add_argument('--epochs', type=int, default=300, help='upper epoch limit')
-parser.add_argument('--topN', type=str, default='[1, 5, 10, 20]')
-parser.add_argument('--tst_w_val', action='store_true', help='test with validation')
-parser.add_argument('--cuda', action='store_true', help='use CUDA')
-parser.add_argument('--gpu', type=str, default='0', help='gpu card ID')
-parser.add_argument('--save_path', type=str, default='./saved_models/', help='save model path')
-parser.add_argument('--log_name', type=str, default='log', help='the log name')
-parser.add_argument('--round', type=int, default=1, help='record the experiment')
-
-parser.add_argument('--w_min', type=float, default=0.1, help='the minimum weight for interactions')
-parser.add_argument('--w_max', type=float, default=1., help='the maximum weight for interactions')
-
-# params for the model
-parser.add_argument('--time_type', type=str, default='add', help='cat or add')
-parser.add_argument('--graph_layers', type=int, default=1, help='the nums layer for the GNN')
-parser.add_argument('--graph_views', type=int, default=1, help='the nums views for the GNN')
-parser.add_argument('--mlp_hidden_dims', type=str, default='[1000]', help='the dims for the DNN')
-parser.add_argument('--norm', type=bool, default=True, help='Normalize the input or not')
-parser.add_argument('--emb_size', type=int, default=10, help='timestep embedding size')
-
-# params for diffusion
-parser.add_argument('--sample_style', type=str, default='uniform', help='importance/uniform/fully')
-parser.add_argument('--mean_type', type=str, default='x0', help='MeanType for diffusion: x0, eps')
-parser.add_argument('--steps', type=int, default=2, help='diffusion steps')
-parser.add_argument('--noise_schedule', type=str, default='linear-var', help='the schedule for noise generating')
-parser.add_argument('--noise_scale', type=float, default=1.0, help='noise scale for noise generating')
-parser.add_argument('--noise_min', type=float, default=0.0005, help='noise lower bound for noise generating')
-parser.add_argument('--noise_max', type=float, default=0.005, help='noise upper bound for noise generating')
-parser.add_argument('--sampling_noise', type=bool, default=False, help='sampling with noise or not')
-parser.add_argument('--sampling_steps', type=int, default=0, help='steps of the forward process during inference')
-parser.add_argument('--reweight', type=bool, default=True, help='assign different weight to different timestep or not')
-
-args = parser.parse_args()
-print("args:", args)
-
-os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
-device = torch.device("cuda:0" if args.cuda else "cpu")
 
 def format_duration(seconds):
     total_seconds = int(seconds)
@@ -81,37 +36,103 @@ def format_duration(seconds):
     minutes, secs = divmod(remainder, 60)
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
+
+def check_leave_one_out(valid_y_data, test_y_data):
+    valid_cnt = np.asarray(valid_y_data.getnnz(axis=1)).reshape(-1)
+    test_cnt = np.asarray(test_y_data.getnnz(axis=1)).reshape(-1)
+    valid_bad = int(np.sum(valid_cnt != 1))
+    test_bad = int(np.sum(test_cnt != 1))
+    if valid_bad > 0 or test_bad > 0:
+        raise ValueError(
+            "Leave-one-out check failed: "
+            f"valid users with !=1 target={valid_bad}, "
+            f"test users with !=1 target={test_bad}."
+        )
+    print("Leave-one-out check passed: each user has one valid and one test target.")
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--dataset", type=str, default="ml-1m", help="choose the dataset")
+parser.add_argument("--data_path", type=str, default="../datasets/", help="load data path")
+parser.add_argument("--lr", type=float, default=0.0001, help="learning rate")
+parser.add_argument("--drop_out", type=float, default=0.1, help="dropout")
+parser.add_argument("--weight_decay", type=float, default=0.0)
+parser.add_argument("--batch_size", type=int, default=400)
+parser.add_argument("--epochs", type=int, default=300, help="upper epoch limit")
+parser.add_argument("--topN", type=str, default="[1, 5, 10, 20]")
+parser.add_argument("--tst_w_val", action="store_true", help="deprecated: test always uses train+val")
+parser.add_argument("--cuda", action="store_true", help="use CUDA")
+parser.add_argument("--gpu", type=str, default="0", help="gpu card ID")
+parser.add_argument("--save_path", type=str, default="./saved_models/", help="save model path")
+parser.add_argument("--log_name", type=str, default="log", help="the log name")
+parser.add_argument("--round", type=int, default=1, help="record the experiment")
+
+parser.add_argument("--w_min", type=float, default=0.1, help="the minimum weight for interactions")
+parser.add_argument("--w_max", type=float, default=1.0, help="the maximum weight for interactions")
+
+# params for the model
+parser.add_argument("--time_type", type=str, default="add", help="cat or add")
+parser.add_argument("--graph_layers", type=int, default=1, help="the nums layer for the GNN")
+parser.add_argument("--graph_views", type=int, default=1, help="the nums views for the GNN")
+parser.add_argument("--mlp_hidden_dims", type=str, default="[1000]", help="the dims for the DNN")
+parser.add_argument("--norm", type=bool, default=True, help="Normalize the input or not")
+parser.add_argument("--emb_size", type=int, default=10, help="timestep embedding size")
+
+# params for diffusion
+parser.add_argument("--sample_style", type=str, default="uniform", help="importance/uniform/fully")
+parser.add_argument("--mean_type", type=str, default="x0", help="MeanType for diffusion: x0, eps")
+parser.add_argument("--steps", type=int, default=2, help="diffusion steps")
+parser.add_argument("--noise_schedule", type=str, default="linear-var", help="noise schedule")
+parser.add_argument("--noise_scale", type=float, default=1.0, help="noise scale")
+parser.add_argument("--noise_min", type=float, default=0.0005, help="noise lower bound")
+parser.add_argument("--noise_max", type=float, default=0.005, help="noise upper bound")
+parser.add_argument("--sampling_noise", type=bool, default=False, help="sampling with noise or not")
+parser.add_argument("--sampling_steps", type=int, default=0, help="steps during inference")
+parser.add_argument("--reweight", type=bool, default=True, help="assign different weight to timestep or not")
+
+args = parser.parse_args()
+print("args:", args)
+
+os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
+device = torch.device("cuda:0" if args.cuda else "cpu")
+
 program_start_time = time.time()
-print("Starting time: ", time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(program_start_time)))
+print("Starting time:", time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(program_start_time)))
 
 ### DATA LOAD ###
-train_path = os.path.join(args.data_path, args.dataset, 'train_list.npy')
-valid_path = os.path.join(args.data_path, args.dataset, 'valid_list.npy')
-test_path = os.path.join(args.data_path, args.dataset, 'test_list.npy')
+train_path = os.path.join(args.data_path, args.dataset, "train_list.npy")
+valid_path = os.path.join(args.data_path, args.dataset, "valid_list.npy")
+test_path = os.path.join(args.data_path, args.dataset, "test_list.npy")
 
-train_data, train_data_ori, valid_y_data, test_y_data, n_user, n_item, g = data_utils.data_load(train_path, valid_path, test_path, args.w_min, args.w_max)
+train_data, train_data_ori, valid_y_data, test_y_data, n_user, n_item, g = data_utils.data_load(
+    train_path, valid_path, test_path, args.w_min, args.w_max
+)
+check_leave_one_out(valid_y_data, test_y_data)
+
 train_dataset = data_utils.DataDiffusion(torch.FloatTensor(train_data.A))
-train_loader = DataLoader(train_dataset, batch_size=args.batch_size, pin_memory=True, shuffle=True, worker_init_fn=worker_init_fn)
+train_loader = DataLoader(
+    train_dataset, batch_size=args.batch_size, pin_memory=True, shuffle=True, worker_init_fn=worker_init_fn
+)
 test_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=False)
 
-if args.tst_w_val:
-    tv_dataset = data_utils.DataDiffusion(torch.FloatTensor(train_data.A) + torch.FloatTensor(valid_y_data.A))
-    test_twv_loader = DataLoader(tv_dataset, batch_size=args.batch_size, shuffle=False)
+# Test always uses train + val as input sequence.
+tv_dataset = data_utils.DataDiffusion(torch.FloatTensor(train_data.A) + torch.FloatTensor(valid_y_data.A))
+test_twv_loader = DataLoader(tv_dataset, batch_size=args.batch_size, shuffle=False)
 mask_tv = train_data_ori + valid_y_data
 
-print('data ready.')
-
+print("data ready.")
 
 ### Build Gaussian Diffusion ###
-if args.mean_type == 'x0':
+if args.mean_type == "x0":
     mean_type = gd.ModelMeanType.START_X
-elif args.mean_type == 'eps':
+elif args.mean_type == "eps":
     mean_type = gd.ModelMeanType.EPSILON
 else:
-    raise ValueError("Unimplemented mean type %s" % args.mean_type)
+    raise ValueError(f"Unimplemented mean type {args.mean_type}")
 
-diffusion = gd.GaussianDiffusion(mean_type, args.noise_schedule, args.noise_scale,
-                                 args.noise_min, args.noise_max, args.steps, device).to(device)
+diffusion = gd.GaussianDiffusion(
+    mean_type, args.noise_schedule, args.noise_scale, args.noise_min, args.noise_max, args.steps, device
+).to(device)
 
 ### Build MLP ###
 if eval(args.mlp_hidden_dims):
@@ -123,11 +144,11 @@ model = GDN(mlp_dims, args.emb_size, g, args.graph_layers, norm=args.norm, dropo
 optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 print("models ready.")
 
-param_num = 0
-mlp_num = sum([param.nelement() for param in model.parameters()])
-diff_num = sum([param.nelement() for param in diffusion.parameters()])  # 0
-param_num = mlp_num + diff_num
+param_num = sum(param.nelement() for param in model.parameters()) + sum(
+    param.nelement() for param in diffusion.parameters()
+)
 print("Number of all parameters:", param_num)
+
 
 def evaluate(data_loader, data_te, mask_his, topN):
     model.eval()
@@ -138,10 +159,10 @@ def evaluate(data_loader, data_te, mask_his, topN):
     target_items = []
     for i in range(e_N):
         target_items.append(data_te[i, :].nonzero()[1].tolist())
-    
+
     with torch.no_grad():
         for batch_idx, batch in enumerate(data_loader):
-            his_data = mask_his[e_idxlist[batch_idx*args.batch_size:batch_idx*args.batch_size+len(batch)]]
+            his_data = mask_his[e_idxlist[batch_idx * args.batch_size : batch_idx * args.batch_size + len(batch)]]
             batch = batch.to(device)
             prediction = diffusion.p_sample(model, batch, args.sampling_steps, args.sampling_noise)
             prediction[his_data.nonzero()] = -np.inf
@@ -150,46 +171,36 @@ def evaluate(data_loader, data_te, mask_his, topN):
             indices = indices.cpu().numpy().tolist()
             predict_items.extend(indices)
 
-    test_results = evaluate_utils.computeHRNDCG(target_items, predict_items, topN)
+    return evaluate_utils.computeHRNDCG(target_items, predict_items, topN)
 
-    return test_results
 
-best_ndcg, best_epoch = -100, 0
+best_ndcg, best_epoch = -100.0, 0
 best_results, best_test_results = None, None
 print("Start training...")
-lr_adjust_times = 0
-all_lr = [args.lr*i for i in [1, 0.1, 0.01]]
 for epoch in range(1, args.epochs + 1):
     if epoch - best_epoch >= 20:
-        print('-'*18)
+        print("-" * 18)
         break
 
     model.train()
     start_time = time.time()
-
-    batch_count = 0
     total_loss = 0.0
-    
-    for batch_idx, batch in enumerate(train_loader):
+
+    for _, batch in enumerate(train_loader):
         batch = batch.to(device)
-        batch_count += 1
         optimizer.zero_grad()
         losses = diffusion.training_losses(model, batch, args.sample_style, args.reweight)
         loss = losses["loss"].mean()
         total_loss += loss
         loss.backward()
         optimizer.step()
-    
+
     if epoch % 5 == 0:
         metric_ks = eval(args.topN)
         valid_results = evaluate(test_loader, valid_y_data, train_data, metric_ks)
-        if args.tst_w_val:
-            test_results = evaluate(test_twv_loader, test_y_data, mask_tv, metric_ks)
-        else:
-            test_results = evaluate(test_loader, test_y_data, mask_tv, metric_ks)
+        test_results = evaluate(test_twv_loader, test_y_data, mask_tv, metric_ks)
         evaluate_utils.print_hr_ndcg_results(valid_results, test_results, metric_ks)
 
-        # NDCG@20 as selection criterion (fallback: use second K if 20 not present).
         select_k = 20 if 20 in metric_ks else metric_ks[min(1, len(metric_ks) - 1)]
         select_idx = metric_ks.index(select_k)
         if valid_results[1][select_idx] > best_ndcg:
@@ -197,20 +208,17 @@ for epoch in range(1, args.epochs + 1):
             best_results = valid_results
             best_test_results = test_results
 
-            # if not os.path.exists(args.save_path):
-            #     os.makedirs(args.save_path)
-            # torch.save(model, '{}{}_lr{}_wd{}_bs{}_dims{}_emb{}_{}_steps{}_scale{}_min{}_max{}_sample{}_reweight{}_wmin{}_wmax{}_{}.pth' \
-            #     .format(args.save_path, args.dataset, args.lr, args.weight_decay, args.batch_size, args.dims, args.emb_size, args.mean_type, \
-            #     args.steps, args.noise_scale, args.noise_min, args.noise_max, args.sampling_steps, args.reweight, args.w_min, args.w_max, args.log_name))
-    
-    print("Runing Epoch {:03d} ".format(epoch) + 'train loss {:.4f}'.format(total_loss) + " costs " + time.strftime(
-                        "%H: %M: %S", time.gmtime(time.time()-start_time)))
-    print('---'*18)
+    print(
+        "Runing Epoch {:03d} ".format(epoch)
+        + "train loss {:.4f}".format(total_loss)
+        + " costs "
+        + time.strftime("%H: %M: %S", time.gmtime(time.time() - start_time))
+    )
+    print("---" * 18)
 
-print('==='*18)
+print("===" * 18)
 print("End. Best Epoch {:03d} ".format(best_epoch))
 evaluate_utils.print_hr_ndcg_results(best_results, best_test_results, eval(args.topN))
 program_end_time = time.time()
-print("End time: ", time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(program_end_time)))
-print("Total running time: ", format_duration(program_end_time - program_start_time))
-
+print("End time:", time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(program_end_time)))
+print("Total running time:", format_duration(program_end_time - program_start_time))
